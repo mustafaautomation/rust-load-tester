@@ -135,3 +135,129 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_result(status: u16, duration_ms: u64, success: bool, bytes: usize) -> RequestResult {
+        RequestResult {
+            status,
+            duration: Duration::from_millis(duration_ms),
+            success,
+            error: if success { None } else { Some("error".to_string()) },
+            bytes,
+        }
+    }
+
+    #[test]
+    fn test_compute_stats_all_successful() {
+        let results = vec![
+            make_result(200, 100, true, 500),
+            make_result(200, 150, true, 600),
+            make_result(200, 200, true, 700),
+        ];
+
+        let stats = compute_stats(&results);
+        assert_eq!(stats.total_requests, 3);
+        assert_eq!(stats.successful, 3);
+        assert_eq!(stats.failed, 0);
+        assert!(stats.error_rate < 0.01);
+        assert!(stats.latency.min_ms <= stats.latency.max_ms);
+        assert!(stats.latency.mean_ms > 0.0);
+        assert_eq!(stats.total_bytes, 1800);
+    }
+
+    #[test]
+    fn test_compute_stats_mixed_results() {
+        let results = vec![
+            make_result(200, 100, true, 500),
+            make_result(500, 50, false, 0),
+            make_result(200, 200, true, 600),
+            make_result(503, 30, false, 0),
+        ];
+
+        let stats = compute_stats(&results);
+        assert_eq!(stats.total_requests, 4);
+        assert_eq!(stats.successful, 2);
+        assert_eq!(stats.failed, 2);
+        assert!((stats.error_rate - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_stats_empty_results() {
+        let stats = compute_stats(&[]);
+        assert_eq!(stats.total_requests, 0);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.failed, 0);
+        assert!(stats.error_rate < 0.01);
+        assert!(stats.latency.min_ms < 0.01);
+        assert!(stats.latency.max_ms < 0.01);
+    }
+
+    #[test]
+    fn test_compute_stats_status_codes() {
+        let results = vec![
+            make_result(200, 100, true, 100),
+            make_result(200, 100, true, 100),
+            make_result(404, 50, false, 0),
+            make_result(500, 50, false, 0),
+        ];
+
+        let stats = compute_stats(&results);
+        assert_eq!(*stats.status_codes.get(&200).unwrap_or(&0), 2);
+        assert_eq!(*stats.status_codes.get(&404).unwrap_or(&0), 1);
+        assert_eq!(*stats.status_codes.get(&500).unwrap_or(&0), 1);
+    }
+
+    #[test]
+    fn test_compute_stats_latency_ordering() {
+        let results = vec![
+            make_result(200, 10, true, 100),
+            make_result(200, 50, true, 100),
+            make_result(200, 100, true, 100),
+            make_result(200, 200, true, 100),
+            make_result(200, 500, true, 100),
+        ];
+
+        let stats = compute_stats(&results);
+        assert!(stats.latency.min_ms <= stats.latency.median_ms);
+        assert!(stats.latency.median_ms <= stats.latency.p90_ms);
+        assert!(stats.latency.p90_ms <= stats.latency.p95_ms);
+        assert!(stats.latency.p95_ms <= stats.latency.p99_ms);
+        assert!(stats.latency.p99_ms <= stats.latency.max_ms);
+    }
+
+    #[test]
+    fn test_compute_stats_single_request() {
+        let results = vec![make_result(200, 42, true, 256)];
+
+        let stats = compute_stats(&results);
+        assert_eq!(stats.total_requests, 1);
+        assert_eq!(stats.successful, 1);
+        assert!((stats.latency.min_ms - 42.0).abs() < 0.1);
+        assert!((stats.latency.max_ms - 42.0).abs() < 0.1);
+        assert!((stats.latency.mean_ms - 42.0).abs() < 0.1);
+        assert!(stats.latency.stdev_ms < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_function() {
+        let sorted = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        assert!((percentile(&sorted, 50.0) - 30.0).abs() < 0.01);
+        assert!((percentile(&sorted, 0.0) - 10.0).abs() < 0.01);
+        assert!((percentile(&sorted, 100.0) - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_empty() {
+        assert!(percentile(&[], 50.0) < 0.01);
+    }
+
+    #[test]
+    fn test_round2() {
+        assert!((round2(3.14159) - 3.14).abs() < 0.001);
+        assert!((round2(0.0) - 0.0).abs() < 0.001);
+        assert!((round2(99.999) - 100.0).abs() < 0.001);
+    }
+}
