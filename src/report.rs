@@ -30,38 +30,14 @@ pub fn print_console(summary: &TestSummary) {
 
     // Latency
     println!("  {}", "Latency:".bold());
-    println!(
-        "    Min:    {:>8.2}ms",
-        summary.latency.min_ms
-    );
-    println!(
-        "    Mean:   {:>8.2}ms",
-        summary.latency.mean_ms
-    );
-    println!(
-        "    Median: {:>8.2}ms",
-        summary.latency.median_ms
-    );
-    println!(
-        "    p90:    {:>8.2}ms",
-        summary.latency.p90_ms
-    );
-    println!(
-        "    p95:    {:>8.2}ms",
-        summary.latency.p95_ms
-    );
-    println!(
-        "    p99:    {:>8.2}ms",
-        summary.latency.p99_ms
-    );
-    println!(
-        "    Max:    {:>8.2}ms",
-        summary.latency.max_ms
-    );
-    println!(
-        "    Stdev:  {:>8.2}ms",
-        summary.latency.stdev_ms
-    );
+    println!("    Min:    {:>8.2}ms", summary.latency.min_ms);
+    println!("    Mean:   {:>8.2}ms", summary.latency.mean_ms);
+    println!("    Median: {:>8.2}ms", summary.latency.median_ms);
+    println!("    p90:    {:>8.2}ms", summary.latency.p90_ms);
+    println!("    p95:    {:>8.2}ms", summary.latency.p95_ms);
+    println!("    p99:    {:>8.2}ms", summary.latency.p99_ms);
+    println!("    Max:    {:>8.2}ms", summary.latency.max_ms);
+    println!("    Stdev:  {:>8.2}ms", summary.latency.stdev_ms);
     println!();
 
     // Status codes
@@ -80,16 +56,21 @@ pub fn print_console(summary: &TestSummary) {
     }
     println!();
 
+    // Transport errors (timeouts, refused connections, ...)
+    if !summary.errors.is_empty() {
+        println!("  {}", "Errors:".bold());
+        let mut errors: Vec<_> = summary.errors.iter().collect();
+        errors.sort_by(|a, b| b.1.cmp(a.1));
+        for (message, count) in errors {
+            println!("    {} → {}", message.red(), count);
+        }
+        println!();
+    }
+
     // Throughput
     println!("  {}", "Throughput:".bold());
-    println!(
-        "    {:.2} req/s",
-        summary.throughput.requests_per_sec
-    );
-    println!(
-        "    {:.2} bytes/s",
-        summary.throughput.bytes_per_sec
-    );
+    println!("    {:.2} req/s", summary.throughput.requests_per_sec);
+    println!("    {:.2} bytes/s", summary.throughput.bytes_per_sec);
     println!();
 }
 

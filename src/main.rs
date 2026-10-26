@@ -1,6 +1,6 @@
+mod report;
 mod runner;
 mod stats;
-mod report;
 
 use clap::Parser;
 use colored::Colorize;
@@ -66,8 +66,8 @@ async fn main() {
         timeout: Duration::from_secs(cli.timeout),
     };
 
-    let results = runner::run_load_test(config).await;
-    let summary = stats::compute_stats(&results);
+    let run = runner::run_load_test(config).await;
+    let summary = stats::compute_stats(&run.results, run.elapsed);
 
     if cli.json {
         report::print_json(&summary);

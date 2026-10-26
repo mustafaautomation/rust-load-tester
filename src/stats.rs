@@ -13,6 +13,8 @@ pub struct TestSummary {
     pub latency: LatencyStats,
     pub throughput: ThroughputStats,
     pub status_codes: HashMap<u16, usize>,
+    /// Transport errors (timeouts, refused connections, ...) grouped by message.
+    pub errors: HashMap<String, usize>,
     pub total_bytes: usize,
 }
 
@@ -35,7 +37,9 @@ pub struct ThroughputStats {
     pub total_duration_secs: f64,
 }
 
-pub fn compute_stats(results: &[RequestResult]) -> TestSummary {
+/// Aggregate per-request results. `wall_clock` is the elapsed time of the whole run and is
+/// what throughput is measured against (summing per-request durations would ignore concurrency).
+pub fn compute_stats(results: &[RequestResult], wall_clock: Duration) -> TestSummary {
     let total = results.len();
     let successful = results.iter().filter(|r| r.success).count();
     let failed = total - successful;
@@ -79,37 +83,30 @@ pub fn compute_stats(results: &[RequestResult]) -> TestSummary {
         }
     };
 
-    let total_duration: Duration = results.iter().map(|r| r.duration).sum();
-    let wall_clock = if !results.is_empty() {
-        let min_start = durations[0];
-        let _ = min_start;
-        total_duration.as_secs_f64() / results.len().max(1) as f64
-            * results.len() as f64
-            / results.len().max(1) as f64
-    } else {
-        0.0
-    };
-
     let total_bytes: usize = results.iter().map(|r| r.bytes).sum();
-    let actual_wall = total_duration.as_secs_f64();
+    let wall_secs = wall_clock.as_secs_f64();
 
     let throughput = ThroughputStats {
-        requests_per_sec: if actual_wall > 0.0 {
-            round2(total as f64 / actual_wall * results.len() as f64)
+        requests_per_sec: if wall_secs > 0.0 {
+            round2(total as f64 / wall_secs)
         } else {
             0.0
         },
-        bytes_per_sec: if actual_wall > 0.0 {
-            round2(total_bytes as f64 / actual_wall * results.len() as f64)
+        bytes_per_sec: if wall_secs > 0.0 {
+            round2(total_bytes as f64 / wall_secs)
         } else {
             0.0
         },
-        total_duration_secs: round2(actual_wall),
+        total_duration_secs: round2(wall_secs),
     };
 
     let mut status_codes: HashMap<u16, usize> = HashMap::new();
+    let mut errors: HashMap<String, usize> = HashMap::new();
     for r in results {
         *status_codes.entry(r.status).or_insert(0) += 1;
+        if let Some(e) = &r.error {
+            *errors.entry(e.clone()).or_insert(0) += 1;
+        }
     }
 
     TestSummary {
@@ -120,6 +117,7 @@ pub fn compute_stats(results: &[RequestResult]) -> TestSummary {
         latency,
         throughput,
         status_codes,
+        errors,
         total_bytes,
     }
 }
@@ -145,7 +143,11 @@ mod tests {
             status,
             duration: Duration::from_millis(duration_ms),
             success,
-            error: if success { None } else { Some("error".to_string()) },
+            error: if success {
+                None
+            } else {
+                Some("error".to_string())
+            },
             bytes,
         }
     }
@@ -158,7 +160,7 @@ mod tests {
             make_result(200, 200, true, 700),
         ];
 
-        let stats = compute_stats(&results);
+        let stats = compute_stats(&results, Duration::from_secs(1));
         assert_eq!(stats.total_requests, 3);
         assert_eq!(stats.successful, 3);
         assert_eq!(stats.failed, 0);
@@ -177,7 +179,7 @@ mod tests {
             make_result(503, 30, false, 0),
         ];
 
-        let stats = compute_stats(&results);
+        let stats = compute_stats(&results, Duration::from_secs(1));
         assert_eq!(stats.total_requests, 4);
         assert_eq!(stats.successful, 2);
         assert_eq!(stats.failed, 2);
@@ -186,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_compute_stats_empty_results() {
-        let stats = compute_stats(&[]);
+        let stats = compute_stats(&[], Duration::ZERO);
         assert_eq!(stats.total_requests, 0);
         assert_eq!(stats.successful, 0);
         assert_eq!(stats.failed, 0);
@@ -204,7 +206,7 @@ mod tests {
             make_result(500, 50, false, 0),
         ];
 
-        let stats = compute_stats(&results);
+        let stats = compute_stats(&results, Duration::from_secs(1));
         assert_eq!(*stats.status_codes.get(&200).unwrap_or(&0), 2);
         assert_eq!(*stats.status_codes.get(&404).unwrap_or(&0), 1);
         assert_eq!(*stats.status_codes.get(&500).unwrap_or(&0), 1);
@@ -220,7 +222,7 @@ mod tests {
             make_result(200, 500, true, 100),
         ];
 
-        let stats = compute_stats(&results);
+        let stats = compute_stats(&results, Duration::from_secs(1));
         assert!(stats.latency.min_ms <= stats.latency.median_ms);
         assert!(stats.latency.median_ms <= stats.latency.p90_ms);
         assert!(stats.latency.p90_ms <= stats.latency.p95_ms);
@@ -232,13 +234,44 @@ mod tests {
     fn test_compute_stats_single_request() {
         let results = vec![make_result(200, 42, true, 256)];
 
-        let stats = compute_stats(&results);
+        let stats = compute_stats(&results, Duration::from_secs(1));
         assert_eq!(stats.total_requests, 1);
         assert_eq!(stats.successful, 1);
         assert!((stats.latency.min_ms - 42.0).abs() < 0.1);
         assert!((stats.latency.max_ms - 42.0).abs() < 0.1);
         assert!((stats.latency.mean_ms - 42.0).abs() < 0.1);
         assert!(stats.latency.stdev_ms < 0.01);
+    }
+
+    #[test]
+    fn test_throughput_uses_wall_clock_time() {
+        // 10 requests of 1s each, run 10-wide in parallel, finish in ~1s of wall time:
+        // throughput is 10 req/s, not 1 req/s as summing request durations would suggest.
+        let results: Vec<_> = (0..10).map(|_| make_result(200, 1000, true, 100)).collect();
+
+        let stats = compute_stats(&results, Duration::from_secs(1));
+        assert!((stats.throughput.requests_per_sec - 10.0).abs() < 0.01);
+        assert!((stats.throughput.bytes_per_sec - 1000.0).abs() < 0.01);
+        assert!((stats.throughput.total_duration_secs - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_zero_wall_clock_gives_zero_throughput() {
+        let results = vec![make_result(200, 10, true, 10)];
+        let stats = compute_stats(&results, Duration::ZERO);
+        assert!(stats.throughput.requests_per_sec < 0.01);
+    }
+
+    #[test]
+    fn test_errors_are_grouped_by_message() {
+        let results = vec![
+            make_result(0, 10, false, 0),
+            make_result(0, 10, false, 0),
+            make_result(200, 10, true, 10),
+        ];
+        let stats = compute_stats(&results, Duration::from_secs(1));
+        assert_eq!(stats.errors.get("error"), Some(&2));
+        assert_eq!(stats.errors.len(), 1);
     }
 
     #[test]
@@ -256,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_round2() {
-        assert!((round2(3.14159) - 3.14).abs() < 0.001);
+        assert!((round2(1.23456) - 1.23).abs() < 0.001);
         assert!((round2(0.0) - 0.0).abs() < 0.001);
         assert!((round2(99.999) - 100.0).abs() < 0.001);
     }
